@@ -118,15 +118,10 @@ jobs:
 
       # ── Optional: notify Slack that a plan is ready for review ───────
       - name: Notify Slack — plan ready
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          TO_DESTROY=$(python -c "
-          import json, sys
-          data = json.load(open('destroy-plan.md')) if False else None
-          " 2>/dev/null || echo "unknown")
-
+          [ -z "$SLACK_WEBHOOK_URL" ] && echo "No Slack webhook configured, skipping." && exit 0
           curl -s -X POST "$SLACK_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{

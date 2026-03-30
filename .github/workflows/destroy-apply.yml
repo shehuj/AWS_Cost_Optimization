@@ -122,12 +122,13 @@ jobs:
 
       # ── Notify approver via Slack ──────────────────────────────────────
       - name: Notify Slack — approval required
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' && steps.plan.outputs.to_destroy != '0' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           TO_DESTROY: ${{ steps.plan.outputs.to_destroy }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "$SLACK_WEBHOOK_URL" ] && echo "No Slack webhook configured, skipping." && exit 0
+          [ "$TO_DESTROY" = "0" ] && echo "Nothing to destroy, skipping notification." && exit 0
           curl -s -X POST "$SLACK_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{
@@ -176,11 +177,11 @@ jobs:
           echo "Proceeding to apply..."
 
       - name: Notify Slack — approved
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "$SLACK_WEBHOOK_URL" ] && echo "No Slack webhook configured, skipping." && exit 0
           curl -s -X POST "$SLACK_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -d "{
@@ -248,12 +249,13 @@ jobs:
           echo "| **Run** | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notify Slack — apply complete
-        if: ${{ always() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "$SLACK_WEBHOOK_URL" ] && echo "No Slack webhook configured, skipping." && exit 0
           COLOR=$([[ "$JOB_STATUS" == "success" ]] && echo "good" || echo "danger")
           ICON=$([[ "$JOB_STATUS" == "success" ]] && echo ":white_check_mark:" || echo ":x:")
           curl -s -X POST "$SLACK_WEBHOOK_URL" \
