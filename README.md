@@ -249,16 +249,27 @@ When the `destroy-apply.yml` workflow reaches the approval job, GitHub emails al
 
 | Workflow | Trigger | Deletes anything? |
 | -------- | ------- | ----------------- |
-| `destroy-plan.yml` | Push to `dev`, PR targeting `main` | Never |
-| `destroy-apply.yml` | Push/merge to `main`, manual dispatch | Only after approval |
+| `destroy-plan.yml` | Push to `dev`, PR targeting `main`, **manual dispatch** | Never |
+| `destroy-apply.yml` | Push/merge to `main`, **manual dispatch** | Only after approval |
 
 ---
 
 ## Running the Workflows
 
-### `destroy-plan.yml` — Runs automatically
+Both workflows support **manual dispatch** — no commit or merge required. Go to **GitHub → Actions**, pick the workflow, click **Run workflow**.
 
-**On push to `dev`:**
+---
+
+### `destroy-plan.yml` — Plan only, never deletes
+
+**Automatic triggers:**
+
+| Event | What happens |
+| ----- | ------------ |
+| Push to `dev` | Plan generated, posted to workflow summary |
+| PR targeting `main` | Plan posted as PR comment, updated on each new push |
+
+**Automatic (push to dev):**
 
 ```bash
 git checkout dev
@@ -267,23 +278,21 @@ git commit -m "your changes"
 git push origin dev
 ```
 
-Go to **GitHub → Actions → Destroy Plan (dev)** to see the plan output in the workflow summary.
+**Manual dispatch:**
 
-**On a PR targeting `main`:**
+1. **GitHub → Actions → Destroy Plan (dev) → Run workflow**
+2. Fill in inputs and click **Run workflow**
 
-```bash
-git checkout dev
-git push origin dev
-# Open a PR from dev → main on GitHub
-```
-
-The plan is automatically posted as a comment on the PR and updates on every new push to the branch.
+| Input | Example | Notes |
+| ----- | ------- | ----- |
+| `regions` | `us-east-1,us-west-2` | Defaults to `us-east-1` |
+| `services` | `ec2,s3` | Defaults to all except IAM |
 
 ---
 
-### `destroy-apply.yml` — Two ways to trigger
+### `destroy-apply.yml` — Plan → approve → apply
 
-**Trigger 1: Merge or push to `main` (automatic)**
+**Automatic (merge to main):**
 
 ```bash
 git checkout main
@@ -291,20 +300,17 @@ git merge dev
 git push origin main
 ```
 
-The workflow starts automatically. It runs the plan job, then pauses at the `approve` job until a reviewer responds.
+**Manual dispatch:**
 
-**Trigger 2: Manual dispatch (run anytime without a push)**
-
-1. Go to **GitHub → Actions → Destroy Apply (main)**
-2. Click **Run workflow** (top right dropdown)
-3. Fill in the inputs:
+1. **GitHub → Actions → Destroy Apply (main) → Run workflow**
+2. Fill in inputs and click **Run workflow**
 
 | Input | Example | Notes |
 | ----- | ------- | ----- |
 | `regions` | `us-east-1,us-west-2` | Defaults to `us-east-1` |
 | `services` | `ec2,s3,rds` | Defaults to all except IAM |
 
-4. Click **Run workflow**
+Either trigger runs the same three-job sequence: plan → approve → apply.
 
 ---
 
@@ -328,11 +334,7 @@ Once `destroy-apply.yml` reaches the `approve` job the workflow pauses:
 Before the workflows will run successfully:
 
 - [ ] Push the repo to GitHub so the workflow files are present on `main`
-- [ ] Create the `dev` branch if it doesn't exist:
-  ```bash
-  git checkout -b dev
-  git push origin dev
-  ```
+- [ ] Create the `dev` branch if it doesn't exist — `git checkout -b dev && git push origin dev`
 - [ ] Add secrets — **Repo → Settings → Secrets and variables → Actions**:
   - `AWS_ACCESS_KEY_ID`
   - `AWS_SECRET_ACCESS_KEY`

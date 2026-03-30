@@ -1,6 +1,6 @@
 # I Built a Terraform-Style Plan/Apply Workflow for AWS Account Resets — Here's Every Design Decision
 
-*Wave-based deletion, a human approval gate, and a destroy plan that looks like this before anything gets touched*
+*Wave-based deletion, a human approval gate, and a destroy plan you can trigger manually — before anything gets touched*
 
 ---
 
@@ -306,9 +306,9 @@ The CI integration is where this framework stops feeling like a script and start
 
 Two workflows:
 
-**`destroy-plan.yml`** — Triggered on every push to `dev` and on pull requests targeting `main`. Generates the destroy plan, posts it to the workflow step summary, and comments it on the PR (updating the comment on re-push rather than creating duplicates). No approvals, no deletions — just visibility.
+**`destroy-plan.yml`** — Triggered on push to `dev`, on pull requests targeting `main`, and **manually via workflow dispatch**. Generates the destroy plan, posts it to the workflow step summary, and comments it on the PR (updating the comment on re-push rather than creating duplicates). No approvals, no deletions — just visibility. Manual dispatch accepts `regions` and `services` inputs so you can scope a plan run to a single service without touching any config or pushing a commit.
 
-**`destroy-apply.yml`** — Triggered on merge to `main`. Three sequential jobs:
+**`destroy-apply.yml`** — Triggered on merge to `main` and **manually via workflow dispatch**. Three sequential jobs:
 
 ```yaml
 jobs:

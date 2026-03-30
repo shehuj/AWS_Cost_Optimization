@@ -10,6 +10,16 @@ on:
   pull_request:
     branches:
       - main        # also show plan when a PR targets main
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "Comma-separated AWS regions"
+        required: false
+        default: "us-east-1"
+      services:
+        description: "Comma-separated services (blank = all except IAM)"
+        required: false
+        default: "cloudformation,ec2,s3,rds,lambda,dynamodb,vpc"
 
 permissions:
   contents: read
@@ -44,8 +54,8 @@ jobs:
       - name: Run destroy plan
         id: plan
         env:
-          AWS_REGIONS: ${{ vars.AWS_REGIONS || 'us-east-1' }}
-          SERVICES: ${{ vars.RESET_SERVICES || 'cloudformation,ec2,s3,rds,lambda,dynamodb,vpc' }}
+          AWS_REGIONS: ${{ github.event.inputs.regions || vars.AWS_REGIONS || 'us-east-1' }}
+          SERVICES: ${{ github.event.inputs.services || vars.RESET_SERVICES || 'cloudformation,ec2,s3,rds,lambda,dynamodb,vpc' }}
           SKIP_IAM: "true"
         run: |
           set +e
