@@ -5,6 +5,7 @@ from typing import List, Dict
 import boto3
 
 from core.config import Config
+from core.plan_formatter import DestroyPlan
 from discovery.base import Resource
 from discovery.ec2 import EC2Discoverer
 from discovery.s3 import S3Discoverer
@@ -48,16 +49,74 @@ class ResetOrchestrator:
         self.session = boto3.Session()
         self._deleters: List[BaseDeleter] = self._build_deleters()
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def plan(self) -> DestroyPlan:
+        """
+        Discover all resources, apply filters, and return a DestroyPlan.
+        Nothing is deleted. Safe to call at any time.
+        """
+        account_id, caller_arn = self._get_caller_identity()
+
+        logger.info("=== DISCOVERY PHASE ===")
+        all_resources = self._discover_all()
+        logger.info(f"Discovered {len(all_resources)} resources across {len(self.config.regions)} region(s)")
+
+        logger.info("=== FILTER PHASE ===")
+        all_resources = apply_filters(all_resources, self.config)
+        actionable = [r for r in all_resources if not r.protected]
+        protected = [r for r in all_resources if r.protected]
+        logger.info(f"To destroy: {len(actionable)} | Protected/skipped: {len(protected)}")
+
+        waves = group_by_priority(actionable)
+
+        return DestroyPlan(
+            account_id=account_id,
+            caller_arn=caller_arn,
+            regions=self.config.regions,
+            services=self.config.services,
+            waves=waves,
+            protected=protected,
+        )
+
+    def apply(self, plan: DestroyPlan) -> Dict:
+        """
+        Execute a previously generated DestroyPlan.
+        Deletes resources wave by wave in dependency-safe order.
+        """
+        if plan.total_destroy == 0:
+            log_success(logger, "Nothing to destroy.")
+            return {"destroyed": 0, "skipped": plan.total_protected, "errors": 0}
+
+        logger.info(f"=== APPLY PHASE — {plan.total_destroy} resources to destroy ===")
+        results = self._delete_in_waves(plan.waves)
+
+        destroyed = sum(1 for r in results if r.success and not r.skipped)
+        errors = sum(1 for r in results if not r.success)
+        skipped = sum(1 for r in results if r.skipped) + plan.total_protected
+
+        log_success(logger, f"Apply complete — destroyed: {destroyed} | skipped: {skipped} | errors: {errors}")
+        if errors:
+            log_warning(logger, "Some deletions failed. Check logs above for details.")
+
+        return {"destroyed": destroyed, "skipped": skipped, "errors": errors}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _build_deleters(self) -> List[BaseDeleter]:
         return [
-            CloudFormationDeleter(dry_run=self.config.dry_run, session=self.session),
-            EC2Deleter(dry_run=self.config.dry_run, session=self.session),
-            S3Deleter(dry_run=self.config.dry_run, session=self.session),
-            RDSDeleter(dry_run=self.config.dry_run, session=self.session),
-            VPCDeleter(dry_run=self.config.dry_run, session=self.session),
-            IAMDeleter(dry_run=self.config.dry_run, session=self.session),
-            LambdaDeleter(dry_run=self.config.dry_run, session=self.session),
-            DynamoDBDeleter(dry_run=self.config.dry_run, session=self.session),
+            CloudFormationDeleter(dry_run=False, session=self.session),
+            EC2Deleter(dry_run=False, session=self.session),
+            S3Deleter(dry_run=False, session=self.session),
+            RDSDeleter(dry_run=False, session=self.session),
+            VPCDeleter(dry_run=False, session=self.session),
+            IAMDeleter(dry_run=False, session=self.session),
+            LambdaDeleter(dry_run=False, session=self.session),
+            DynamoDBDeleter(dry_run=False, session=self.session),
         ]
 
     def _get_deleter(self, resource_type: str) -> BaseDeleter | None:
@@ -66,62 +125,25 @@ class ResetOrchestrator:
                 return d
         return None
 
-    def run(self) -> Dict:
-        # Resolve caller identity to protect the running role
-        self._set_caller_identity()
-
-        # 1. Discover
-        logger.info("=== DISCOVERY PHASE ===")
-        all_resources = self._discover_all()
-        logger.info(f"Discovered {len(all_resources)} resources across {len(self.config.regions)} region(s)")
-
-        # 2. Filter
-        logger.info("=== FILTER PHASE ===")
-        all_resources = apply_filters(all_resources, self.config)
-        actionable = [r for r in all_resources if not r.protected]
-        protected = [r for r in all_resources if r.protected]
-        logger.info(f"Actionable: {len(actionable)} | Protected/skipped: {len(protected)}")
-
-        if not actionable:
-            log_success(logger, "Nothing to delete.")
-            return {"deleted": 0, "skipped": len(protected), "errors": 0}
-
-        # 3. Print plan
-        self._print_plan(actionable)
-
-        if self.config.dry_run:
-            log_success(logger, "Dry-run complete — no resources were deleted.")
-            return {"deleted": 0, "skipped": len(protected), "errors": 0, "dry_run": True}
-
-        # 4. Delete in dependency order (wave by wave)
-        logger.info("=== DELETION PHASE ===")
-        results = self._delete_in_waves(actionable)
-
-        deleted = sum(1 for r in results if r.success and not r.skipped)
-        errors = sum(1 for r in results if not r.success)
-        skipped = sum(1 for r in results if r.skipped) + len(protected)
-
-        log_success(logger, f"Reset complete — deleted: {deleted} | skipped: {skipped} | errors: {errors}")
-        if errors:
-            log_warning(logger, "Some deletions failed. Check logs above for details.")
-
-        return {"deleted": deleted, "skipped": skipped, "errors": errors}
-
-    def _set_caller_identity(self):
+    def _get_caller_identity(self):
         try:
             sts = self.session.client("sts")
             identity = sts.get_caller_identity()
-            self.config.caller_identity_arn = identity["Arn"]
-            logger.info(f"Running as: {identity['Arn']}")
+            arn = identity["Arn"]
+            account_id = identity["Account"]
+            self.config.caller_identity_arn = arn
+            logger.info(f"Running as: {arn}")
+            return account_id, arn
         except Exception as e:
             log_warning(logger, f"Could not determine caller identity: {e}")
+            return "unknown", "unknown"
 
     def _discover_all(self) -> List[Resource]:
         all_resources: List[Resource] = []
-        services = self.config.services
+        services = list(self.config.services)
 
         if self.config.skip_cloudformation and "cloudformation" in services:
-            services = [s for s in services if s != "cloudformation"]
+            services.remove("cloudformation")
 
         for region in self.config.regions:
             logger.info(f"Discovering resources in region: {region}")
@@ -140,28 +162,14 @@ class ResetOrchestrator:
 
         return all_resources
 
-    def _print_plan(self, resources: List[Resource]) -> None:
-        logger.info("=== DELETION PLAN ===")
-        waves = group_by_priority(resources)
-        for i, wave in enumerate(waves, 1):
-            logger.info(f"Wave {i}:")
-            for r in wave:
-                logger.info(f"  - [{r.resource_type}] {r.resource_id} ({r.name}) in {r.region}")
-
-    def _delete_in_waves(self, resources: List[Resource]) -> List[DeletionResult]:
-        waves = group_by_priority(resources)
+    def _delete_in_waves(self, waves: List[List[Resource]]) -> List[DeletionResult]:
         all_results: List[DeletionResult] = []
-
         for i, wave in enumerate(waves, 1):
             logger.info(f"--- Wave {i}: {len(wave)} resources ---")
             wave_results = self._delete_wave(wave)
             all_results.extend(wave_results)
-
-            failed = [r for r in wave_results if not r.success]
-            if failed:
-                for f in failed:
-                    log_error(logger, f"Failed: {f.resource.resource_type} {f.resource.resource_id}: {f.error}")
-
+            for f in (r for r in wave_results if not r.success):
+                log_error(logger, f"Failed: {f.resource.resource_type} {f.resource.resource_id}: {f.error}")
         return all_results
 
     def _delete_wave(self, resources: List[Resource]) -> List[DeletionResult]:
@@ -180,11 +188,11 @@ class ResetOrchestrator:
                 result = future.result()
                 resource = futures[future]
                 if result.success and not result.skipped:
-                    logger.info(f"  Deleted: [{resource.resource_type}] {resource.resource_id}")
+                    logger.info(f"  Destroyed: [{resource.resource_type}] {resource.resource_id}")
                 elif result.skipped:
-                    logger.debug(f"  Skipped: [{resource.resource_type}] {resource.resource_id}")
+                    logger.debug(f"  Skipped:   [{resource.resource_type}] {resource.resource_id}")
                 else:
-                    log_error(logger, f"  Error: [{resource.resource_type}] {resource.resource_id}: {result.error}")
+                    log_error(logger, f"  Error:     [{resource.resource_type}] {resource.resource_id}: {result.error}")
                 results.append(result)
 
         return results

@@ -1,0 +1,132 @@
+name: Destroy Plan (dev)
+
+# Runs on every push to dev — generates and displays the destroy plan.
+# Nothing is deleted. Acts as a preview / code-review aid.
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - main        # also show plan when a PR targets main
+
+permissions:
+  contents: read
+  pull-requests: write   # needed to post plan as PR comment
+
+jobs:
+  plan:
+    name: Generate Destroy Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # ── Generate plan ──────────────────────────────────────────────────
+      - name: Run destroy plan
+        id: plan
+        env:
+          AWS_REGIONS: ${{ vars.AWS_REGIONS || 'us-east-1' }}
+          SERVICES: ${{ vars.RESET_SERVICES || 'cloudformation,ec2,s3,rds,lambda,dynamodb,vpc' }}
+          SKIP_IAM: "true"
+        run: |
+          set +e
+          python main.py plan \
+            --regions "$AWS_REGIONS" \
+            --services "$SERVICES" \
+            --output markdown \
+            --save-plan destroy-plan.md
+          EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          # Exit 2 = has resources to destroy, exit 0 = nothing to do — both are OK here
+          exit 0
+
+      # ── Post plan to workflow summary ─────────────────────────────────
+      - name: Post plan to step summary
+        run: cat destroy-plan.md >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Upload plan as artifact (downloaded by apply workflow) ────────
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: destroy-plan
+          path: destroy-plan.md
+          retention-days: 7
+
+      # ── Comment plan on pull request ──────────────────────────────────
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('destroy-plan.md', 'utf8');
+
+            const header = '<!-- aws-destroy-plan -->';
+            const body = `${header}\n\n${plan}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(header));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # ── Optional: notify Slack that a plan is ready for review ───────
+      - name: Notify Slack — plan ready
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          TO_DESTROY=$(python -c "
+          import json, sys
+          data = json.load(open('destroy-plan.md')) if False else None
+          " 2>/dev/null || echo "unknown")
+
+          curl -s -X POST "$SLACK_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \":aws: *AWS Destroy Plan Ready*\",
+              \"attachments\": [{
+                \"color\": \"warning\",
+                \"fields\": [
+                  {\"title\": \"Branch\", \"value\": \"${{ github.ref_name }}\", \"short\": true},
+                  {\"title\": \"Triggered by\", \"value\": \"${{ github.actor }}\", \"short\": true},
+                  {\"title\": \"Workflow\", \"value\": \"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Plan>\", \"short\": false}
+                ]
+              }]
+            }"

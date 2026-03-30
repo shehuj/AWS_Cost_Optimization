@@ -1,105 +1,189 @@
 #!/usr/bin/env python3
 """
 AWS Account Reset Framework
-Discovers and deletes AWS resources in dependency-safe order.
+Plan and apply destruction of AWS resources in dependency-safe order.
+
+Usage:
+  python main.py plan   [options]   # generate destroy plan, print and exit
+  python main.py apply  [options]   # execute the destroy plan
 """
 import sys
 import click
 from rich.console import Console
-from rich.panel import Panel
 
 from core.config import Config, ALL_SERVICES
 from core.orchestrator import ResetOrchestrator
+from core.plan_formatter import format_terminal, format_markdown, format_json
 from utils.logger import get_logger
 
 console = Console()
 logger = get_logger("aws-reset")
 
 
-@click.command()
-@click.option("--regions", "-r", default="us-east-1",
-              help="Comma-separated list of AWS regions (default: us-east-1)")
-@click.option("--services", "-s", default=",".join(ALL_SERVICES),
-              help=f"Comma-separated services to reset (default: all). Available: {', '.join(ALL_SERVICES)}")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Discover and print plan without deleting anything")
-@click.option("--skip-iam", is_flag=True, default=True,
-              help="Skip IAM resources (default: True — explicit --no-skip-iam to include)")
-@click.option("--no-skip-iam", "skip_iam", flag_value=False,
-              help="Include IAM resources in the reset (dangerous)")
-@click.option("--skip-default-vpc", is_flag=True, default=True,
-              help="Skip default VPC and its subnets (default: True)")
-@click.option("--no-skip-default-vpc", "skip_default_vpc", flag_value=False)
-@click.option("--skip-cloudformation", is_flag=True, default=False,
-              help="Skip CloudFormation stacks")
-@click.option("--config-file", "-c", default=None,
-              help="Path to a YAML config file")
-@click.option("--protected-tag-key", default="do_not_delete",
-              help="Tag key used to protect resources (default: do_not_delete)")
-@click.option("--protected-tag-value", default="true",
-              help="Tag value used to protect resources (default: true)")
-@click.option("--confirm", is_flag=True, default=False,
-              help="Skip the interactive confirmation prompt (for CI/automation)")
-def main(
-    regions, services, dry_run, skip_iam, skip_default_vpc,
-    skip_cloudformation, config_file, protected_tag_key,
-    protected_tag_value, confirm
-):
-    """
-    AWS Account Reset Framework
+# ---------------------------------------------------------------------------
+# Shared options factory
+# ---------------------------------------------------------------------------
 
-    Discovers all resources across specified regions and deletes them in
-    dependency-safe order. Respects protection tags and default VPC preservation.
+def _shared_options(fn):
+    """Decorator that attaches shared CLI options to a command."""
+    options = [
+        click.option("--regions", "-r", default="us-east-1",
+                     help="Comma-separated AWS regions  [default: us-east-1]"),
+        click.option("--services", "-s", default=",".join(ALL_SERVICES),
+                     help="Comma-separated services to target  [default: all]"),
+        click.option("--skip-iam/--no-skip-iam", default=True,
+                     help="Skip IAM resources  [default: skip]"),
+        click.option("--skip-default-vpc/--no-skip-default-vpc", default=True,
+                     help="Preserve default VPC and its subnets  [default: preserve]"),
+        click.option("--skip-cloudformation", is_flag=True, default=False,
+                     help="Skip CloudFormation stacks"),
+        click.option("--protected-tag-key", default="do_not_delete",
+                     help="Tag key marking a resource as protected"),
+        click.option("--protected-tag-value", default="true",
+                     help="Tag value marking a resource as protected"),
+        click.option("--config-file", "-c", default=None,
+                     help="Path to a YAML config file (overrides CLI flags)"),
+    ]
+    for option in reversed(options):
+        fn = option(fn)
+    return fn
 
-    WARNING: This performs IRREVERSIBLE destructive operations.
-    Always run with --dry-run first to preview what will be deleted.
-    """
-    # Load config (file takes precedence, then CLI, then env)
+
+def _build_config(regions, services, skip_iam, skip_default_vpc,
+                  skip_cloudformation, protected_tag_key,
+                  protected_tag_value, config_file) -> Config:
     if config_file:
-        cfg = Config.from_file(config_file)
-    else:
-        cfg = Config.from_env()
-        cfg.regions = [r.strip() for r in regions.split(",")]
-        cfg.services = [s.strip() for s in services.split(",")]
-        cfg.dry_run = dry_run
-        cfg.skip_iam = skip_iam
-        cfg.skip_default_vpc = skip_default_vpc
-        cfg.skip_cloudformation = skip_cloudformation
-        cfg.protected_tag_key = protected_tag_key
-        cfg.protected_tag_value = protected_tag_value
+        return Config.from_file(config_file)
+    cfg = Config.from_env()
+    cfg.regions = [r.strip() for r in regions.split(",")]
+    cfg.services = [s.strip() for s in services.split(",")]
+    cfg.skip_iam = skip_iam
+    cfg.skip_default_vpc = skip_default_vpc
+    cfg.skip_cloudformation = skip_cloudformation
+    cfg.protected_tag_key = protected_tag_key
+    cfg.protected_tag_value = protected_tag_value
+    return cfg
 
-    # Print banner
-    mode = "[bold red]LIVE[/bold red]" if not cfg.dry_run else "[bold magenta]DRY-RUN[/bold magenta]"
-    console.print(Panel(
-        f"[bold]AWS Account Reset Framework[/bold]\n"
-        f"Regions : {', '.join(cfg.regions)}\n"
-        f"Services: {', '.join(cfg.services)}\n"
-        f"IAM     : {'skip' if cfg.skip_iam else '[bold red]INCLUDED[/bold red]'}\n"
-        f"Mode    : {mode}",
-        title="aws-reset",
-        border_style="red" if not cfg.dry_run else "magenta",
-    ))
 
-    if not cfg.dry_run:
-        if not confirm:
-            console.print(
-                "\n[bold red]WARNING:[/bold red] This will PERMANENTLY DELETE resources. "
-                "This action is [bold]irreversible[/bold].\n"
-            )
-            response = click.prompt(
-                'Type "CONFIRM RESET" to proceed',
-                default="",
-            )
-            if response != "CONFIRM RESET":
-                console.print("[yellow]Aborted.[/yellow]")
-                sys.exit(0)
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
+
+@click.group()
+def cli():
+    """AWS Account Reset Framework — plan and apply destructive account resets."""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# plan subcommand
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@_shared_options
+@click.option("--output", "-o",
+              type=click.Choice(["text", "markdown", "json"], case_sensitive=False),
+              default="text",
+              help="Output format  [default: text]")
+@click.option("--save-plan", default=None,
+              help="Write plan output to this file path (respects --output format)")
+def plan(regions, services, skip_iam, skip_default_vpc, skip_cloudformation,
+         protected_tag_key, protected_tag_value, config_file, output, save_plan):
+    """
+    Discover all resources and print the destruction plan.
+
+    No resources are deleted. Safe to run at any time.
+    Equivalent to 'terraform plan'.
+    """
+    cfg = _build_config(
+        regions, services, skip_iam, skip_default_vpc,
+        skip_cloudformation, protected_tag_key, protected_tag_value, config_file,
+    )
 
     orchestrator = ResetOrchestrator(config=cfg)
-    summary = orchestrator.run()
+    destroy_plan = orchestrator.plan()
+
+    if output == "text":
+        format_terminal(destroy_plan)
+    elif output == "markdown":
+        md = format_markdown(destroy_plan)
+        click.echo(md)
+    elif output == "json":
+        click.echo(format_json(destroy_plan))
+
+    if save_plan:
+        _write_plan_file(destroy_plan, save_plan, output)
+        logger.info(f"Plan saved to: {save_plan}")
+
+    # Exit 2 when there are resources to destroy — lets CI distinguish
+    # "nothing to do" (0) from "plan has changes" (2), same as terraform.
+    sys.exit(2 if destroy_plan.total_destroy > 0 else 0)
+
+
+# ---------------------------------------------------------------------------
+# apply subcommand
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@_shared_options
+@click.option("--confirm", is_flag=True, default=False,
+              help="Skip interactive confirmation prompt (required for CI)")
+def apply(regions, services, skip_iam, skip_default_vpc, skip_cloudformation,
+          protected_tag_key, protected_tag_value, config_file, confirm):
+    """
+    Generate the destruction plan and execute it.
+
+    Prompts for confirmation unless --confirm is passed.
+    Equivalent to 'terraform apply'.
+
+    WARNING: This permanently deletes AWS resources. Always run 'plan' first.
+    """
+    cfg = _build_config(
+        regions, services, skip_iam, skip_default_vpc,
+        skip_cloudformation, protected_tag_key, protected_tag_value, config_file,
+    )
+
+    orchestrator = ResetOrchestrator(config=cfg)
+
+    # Always generate and display the plan first
+    console.print("\n[bold yellow]Generating destroy plan...[/bold yellow]\n")
+    destroy_plan = orchestrator.plan()
+    format_terminal(destroy_plan)
+
+    if destroy_plan.total_destroy == 0:
+        console.print("[bold green]Nothing to destroy. Exiting.[/bold green]")
+        sys.exit(0)
+
+    # Confirmation gate
+    if not confirm:
+        console.print(
+            "\n[bold red]WARNING:[/bold red] The above resources will be "
+            "[bold]permanently deleted[/bold]. This cannot be undone.\n"
+        )
+        response = click.prompt('Type "CONFIRM RESET" to apply', default="")
+        if response != "CONFIRM RESET":
+            console.print("[yellow]Aborted — no resources were deleted.[/yellow]")
+            sys.exit(0)
+
+    summary = orchestrator.apply(destroy_plan)
 
     if summary.get("errors", 0) > 0:
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _write_plan_file(destroy_plan, path: str, fmt: str) -> None:
+    from core.plan_formatter import format_markdown, format_json
+    if fmt == "json":
+        content = format_json(destroy_plan)
+    else:
+        content = format_markdown(destroy_plan)
+    with open(path, "w") as f:
+        f.write(content)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
