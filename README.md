@@ -254,6 +254,94 @@ When the `destroy-apply.yml` workflow reaches the approval job, GitHub emails al
 
 ---
 
+## Running the Workflows
+
+### `destroy-plan.yml` — Runs automatically
+
+**On push to `dev`:**
+
+```bash
+git checkout dev
+git add .
+git commit -m "your changes"
+git push origin dev
+```
+
+Go to **GitHub → Actions → Destroy Plan (dev)** to see the plan output in the workflow summary.
+
+**On a PR targeting `main`:**
+
+```bash
+git checkout dev
+git push origin dev
+# Open a PR from dev → main on GitHub
+```
+
+The plan is automatically posted as a comment on the PR and updates on every new push to the branch.
+
+---
+
+### `destroy-apply.yml` — Two ways to trigger
+
+**Trigger 1: Merge or push to `main` (automatic)**
+
+```bash
+git checkout main
+git merge dev
+git push origin main
+```
+
+The workflow starts automatically. It runs the plan job, then pauses at the `approve` job until a reviewer responds.
+
+**Trigger 2: Manual dispatch (run anytime without a push)**
+
+1. Go to **GitHub → Actions → Destroy Apply (main)**
+2. Click **Run workflow** (top right dropdown)
+3. Fill in the inputs:
+
+| Input | Example | Notes |
+| ----- | ------- | ----- |
+| `regions` | `us-east-1,us-west-2` | Defaults to `us-east-1` |
+| `services` | `ec2,s3,rds` | Defaults to all except IAM |
+
+4. Click **Run workflow**
+
+---
+
+### Approving the apply job
+
+Once `destroy-apply.yml` reaches the `approve` job the workflow pauses:
+
+1. Required reviewers receive an email — *"Your review is required"*
+2. Click the link → lands on the Actions run page
+3. Click **Review deployments** (yellow banner at the top)
+4. Read the destroy plan from the **Job 1 summary** tab
+5. Choose **Approve and deploy** or **Reject**
+
+**Approve** → the `apply` job runs and destroys resources.
+**Reject** → the workflow is cancelled, nothing is deleted.
+
+---
+
+### One-time setup checklist
+
+Before the workflows will run successfully:
+
+- [ ] Push the repo to GitHub so the workflow files are present on `main`
+- [ ] Create the `dev` branch if it doesn't exist:
+  ```bash
+  git checkout -b dev
+  git push origin dev
+  ```
+- [ ] Add secrets — **Repo → Settings → Secrets and variables → Actions**:
+  - `AWS_ACCESS_KEY_ID`
+  - `AWS_SECRET_ACCESS_KEY`
+- [ ] Create the approval environment — **Repo → Settings → Environments → New environment**:
+  - Name it exactly `reset-approval`
+  - Add Required Reviewers
+
+---
+
 ### Notification Flow (with `SLACK_WEBHOOK_URL`)
 
 | Event | Message |
