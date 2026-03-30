@@ -174,13 +174,14 @@ Trigger via **Actions → AWS Account Reset → Run workflow**.
 | `dry_run` | No | Set `true` to preview without deleting |
 | `skip_iam` | No | Set `false` to include IAM resources (default: `true`) |
 
-### Required GitHub secret
+### Required GitHub secrets
 
 | Secret | Description |
 | ------ | ----------- |
-| `AWS_ROLE_ARN` | ARN of the IAM role to assume via OIDC |
+| `AWS_ACCESS_KEY_ID` | IAM user access key ID |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret access key |
 
-The role needs `AdministratorAccess` (or equivalent broad permissions) and an OIDC trust policy for `token.actions.githubusercontent.com`.
+The IAM user needs `AdministratorAccess` or equivalent broad permissions across the services being reset.
 
 ---
 
