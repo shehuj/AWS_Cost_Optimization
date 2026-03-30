@@ -1,0 +1,79 @@
+name: AWS Account Reset
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'CONFIRM RESET' to proceed with destructive cleanup"
+        required: true
+      regions:
+        description: "Comma-separated AWS regions (e.g. us-east-1,us-west-2)"
+        required: false
+        default: "us-east-1"
+      services:
+        description: "Comma-separated services to reset (leave blank for all)"
+        required: false
+        default: "cloudformation,ec2,s3,rds,lambda,dynamodb,vpc"
+      dry_run:
+        description: "Set to 'true' to preview without deleting"
+        required: false
+        default: "false"
+      skip_iam:
+        description: "Set to 'false' to include IAM resources (dangerous)"
+        required: false
+        default: "true"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+
+    if: ${{ github.event.inputs.confirm == 'CONFIRM RESET' || github.event.inputs.dry_run == 'true' }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Run AWS Reset (Dry Run)
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        env:
+          AWS_REGIONS: ${{ github.event.inputs.regions }}
+          SERVICES: ${{ github.event.inputs.services }}
+          SKIP_IAM: ${{ github.event.inputs.skip_iam }}
+          DRY_RUN: "true"
+        run: |
+          python main.py \
+            --regions "$AWS_REGIONS" \
+            --services "$SERVICES" \
+            --dry-run \
+            --confirm
+
+      - name: Run AWS Reset (Live)
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.confirm == 'CONFIRM RESET' }}
+        env:
+          AWS_REGIONS: ${{ github.event.inputs.regions }}
+          SERVICES: ${{ github.event.inputs.services }}
+          SKIP_IAM: ${{ github.event.inputs.skip_iam }}
+        run: |
+          python main.py \
+            --regions "$AWS_REGIONS" \
+            --services "$SERVICES" \
+            --confirm

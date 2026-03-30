@@ -1,0 +1,36 @@
+# AWS Account Reset - Configuration
+# All fields are optional. CLI flags and environment variables override these.
+
+# AWS regions to reset
+regions:
+  - us-east-1
+  # - us-west-2
+  # - eu-west-1
+
+# Services to include in the reset (comment out to exclude)
+services:
+  - cloudformation
+  - ec2
+  - s3
+  - rds
+  - lambda
+  - dynamodb
+  - vpc
+  # - iam  # uncomment with extreme caution
+
+# Tag that marks a resource as protected (will never be deleted)
+protected_tag_key: do_not_delete
+protected_tag_value: "true"
+
+# Safety flags
+skip_iam: true           # Set to false only if you explicitly want IAM wiped
+skip_default_vpc: true   # Preserve the default VPC in each region
+skip_cloudformation: false
+
+# Resource IDs to always skip regardless of tags
+skip_resource_ids: []
+  # - i-0abc1234567890abc
+  # - my-critical-bucket
+
+# Parallelism within each deletion wave
+max_workers: 5
