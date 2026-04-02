@@ -1,7 +1,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
-
+import time
 import boto3
 
 from core.config import Config
@@ -85,13 +85,14 @@ class ResetOrchestrator:
         """
         Execute a previously generated DestroyPlan.
         Deletes resources wave by wave in dependency-safe order.
+        Retries failed deletions with exponential backoff.
         """
         if plan.total_destroy == 0:
             log_success(logger, "Nothing to destroy.")
             return {"destroyed": 0, "skipped": plan.total_protected, "errors": 0}
 
         logger.info(f"=== APPLY PHASE — {plan.total_destroy} resources to destroy ===")
-        results = self._delete_in_waves(plan.waves)
+        results = self._delete_in_waves_with_retries(plan.waves)
 
         destroyed = sum(1 for r in results if r.success and not r.skipped)
         errors = sum(1 for r in results if not r.success)
@@ -161,6 +162,72 @@ class ResetOrchestrator:
                     log_error(logger, f"Discovery failed for {service} in {region}: {e}")
 
         return all_resources
+
+    def _is_dependency_error(self, error_msg: str) -> bool:
+        """Check if error is a dependency-related issue that may resolve with retry."""
+        dependency_keywords = [
+            "DependencyViolation",
+            "dependencies",
+            "dependent object",
+            "has dependencies",
+            "cannot be deleted",
+        ]
+        error_lower = error_msg.lower()
+        return any(keyword.lower() in error_lower for keyword in dependency_keywords)
+
+    def _delete_in_waves_with_retries(self, waves: List[List[Resource]]) -> List[DeletionResult]:
+        """Delete resources wave by wave with retry logic for dependency errors."""
+        all_results: List[DeletionResult] = []
+        max_retries = 3
+        base_delay = 2  # seconds
+
+        # First pass: delete all waves
+        for i, wave in enumerate(waves, 1):
+            logger.info(f"--- Wave {i}: {len(wave)} resources ---")
+            wave_results = self._delete_wave(wave)
+            all_results.extend(wave_results)
+
+        # Retry phase: retry failed deletions that had dependency errors
+        failed_resources = [
+            r for r in all_results 
+            if not r.success and self._is_dependency_error(r.error)
+        ]
+
+        retry_attempt = 0
+        while failed_resources and retry_attempt < max_retries:
+            retry_attempt += 1
+            delay = base_delay * (2 ** (retry_attempt - 1))  # exponential backoff
+            logger.info(f"--- Retry {retry_attempt}/{max_retries}: {len(failed_resources)} resources (waiting {delay}s) ---")
+            time.sleep(delay)
+
+            # Attempt to delete failed resources again
+            retry_results = self._delete_wave([r.resource for r in failed_resources])
+
+            # Update results and filter for next retry
+            for i, result in enumerate(retry_results):
+                # Find and update the original result
+                for j, orig_result in enumerate(all_results):
+                    if orig_result.resource.resource_id == result.resource.resource_id:
+                        all_results[j] = result
+                        break
+
+            # Prepare next retry batch (only dependency errors)
+            failed_resources = [
+                r for r in retry_results 
+                if not r.success and self._is_dependency_error(r.error)
+            ]
+
+            # Log results
+            retry_success = sum(1 for r in retry_results if r.success)
+            if retry_success > 0:
+                logger.info(f"  Retry {retry_attempt}: {retry_success} resources deleted")
+
+        # Log final errors
+        for r in all_results:
+            if not r.success:
+                log_error(logger, f"Failed: {r.resource.resource_type} {r.resource.resource_id}: {r.error}")
+
+        return all_results
 
     def _delete_in_waves(self, waves: List[List[Resource]]) -> List[DeletionResult]:
         all_results: List[DeletionResult] = []
