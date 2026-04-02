@@ -55,9 +55,25 @@ class EC2Deleter(BaseDeleter):
             if assoc_id:
                 try:
                     ec2.disassociate_address(AssociationId=assoc_id)
-                except ClientError:
+                    time.sleep(1)  # Wait for disassociation to complete
+                except ClientError as e:
+                    # If address is not associated, continue anyway
+                    if "InvalidAssociationID" not in str(e):
+                        pass
+            
+            # Release the address with retry logic
+            try:
+                ec2.release_address(AllocationId=rid)
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                # If it's a permission error, re-raise for retry
+                if error_code == "OperationNotPermitted":
+                    raise
+                # If address doesn't exist, silently ignore
+                elif error_code in ["InvalidAllocationID.NotFound", "InvalidAddress.NotFound"]:
                     pass
-            ec2.release_address(AllocationId=rid)
+                else:
+                    raise
 
         elif rtype == "ec2:key_pair":
             ec2.delete_key_pair(KeyPairId=rid)
@@ -67,9 +83,15 @@ class EC2Deleter(BaseDeleter):
         elapsed = 0
         interval = 10
         while elapsed < max_wait:
-            resp = ec2_client.describe_instances(InstanceIds=[instance_id])
-            state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
-            if state == "terminated":
-                return
+            try:
+                resp = ec2_client.describe_instances(InstanceIds=[instance_id])
+                state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+                if state == "terminated":
+                    return
+            except ClientError as e:
+                # Instance doesn't exist anymore (already terminated)
+                if "InvalidInstanceID.NotFound" in str(e):
+                    return
+                raise
             time.sleep(interval)
             elapsed += interval
