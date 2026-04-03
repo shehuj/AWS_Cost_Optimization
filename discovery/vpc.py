@@ -17,6 +17,7 @@ class VPCDiscoverer(BaseDiscoverer):
         resources.extend(self._discover_internet_gateways())
         resources.extend(self._discover_nat_gateways())
         resources.extend(self._discover_vpc_endpoints())
+        resources.extend(self._discover_network_interfaces())
         resources.extend(self._discover_security_groups())
         resources.extend(self._discover_network_acls())
         resources.extend(self._discover_load_balancers())
@@ -141,6 +142,42 @@ class VPCDiscoverer(BaseDiscoverer):
                     region=self.region,
                     tags=tags,
                     metadata={"vpc_id": ep["VpcId"], "service": ep["ServiceName"]},
+                ))
+        return resources
+
+    def _discover_network_interfaces(self) -> List[Resource]:
+        ec2 = self.client("ec2")
+        resources = []
+        paginator = ec2.get_paginator("describe_network_interfaces")
+        for page in paginator.paginate():
+            for eni in page.get("NetworkInterfaces", []):
+                # Skip ENIs directly attached to EC2 instances — instance termination
+                # releases those. We only want service-managed ENIs (Lambda, RDS, ECS, etc.)
+                # and any loose available ENIs.
+                attachment = eni.get("Attachment", {})
+                if attachment.get("InstanceId"):
+                    continue
+                # Must belong to a VPC to be relevant
+                if not eni.get("VpcId"):
+                    continue
+                status = eni["Status"]
+                if status not in ("available", "in-use"):
+                    continue
+                tags = tags_to_dict(eni.get("TagSet", []))
+                resources.append(Resource(
+                    resource_id=eni["NetworkInterfaceId"],
+                    resource_type="ec2:network_interface",
+                    name=tags.get("Name", eni["NetworkInterfaceId"]),
+                    region=self.region,
+                    tags=tags,
+                    metadata={
+                        "status": status,
+                        "interface_type": eni.get("InterfaceType", "interface"),
+                        "vpc_id": eni.get("VpcId", ""),
+                        "subnet_id": eni.get("SubnetId", ""),
+                        "requester_managed": eni.get("RequesterManaged", False),
+                        "description": eni.get("Description", ""),
+                    },
                 ))
         return resources
 

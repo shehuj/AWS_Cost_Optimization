@@ -38,6 +38,7 @@ DELETION_PRIORITY = {
     "ec2:snapshot": 52,
     "ec2:elastic_ip": 60,
     "ec2:vpc_endpoint": 65,
+    "ec2:network_interface": 68,
     "ec2:security_group": 70,
     "ec2:route_table": 80,
     "ec2:network_acl": 81,
