@@ -1,7 +1,10 @@
+import logging
 import time
 from botocore.exceptions import ClientError
 from discovery.base import Resource
 from .base import BaseDeleter
+
+logger = logging.getLogger("aws-reset")
 
 
 class VPCDeleter(BaseDeleter):
@@ -29,6 +32,8 @@ class VPCDeleter(BaseDeleter):
             ec2.delete_vpc(VpcId=rid)
 
         elif rtype == "ec2:subnet":
+            # Delete available ENIs in the subnet (left by Lambda, RDS, ECS, etc.)
+            self._delete_enis_in_subnet(ec2, rid)
             ec2.delete_subnet(SubnetId=rid)
 
         elif rtype == "ec2:route_table":
@@ -45,12 +50,16 @@ class VPCDeleter(BaseDeleter):
             ec2.delete_route_table(RouteTableId=rid)
 
         elif rtype == "ec2:internet_gateway":
-            # Detach from all VPCs first
-            for vpc_id in resource.metadata.get("attached_vpcs", []):
-                try:
-                    ec2.detach_internet_gateway(InternetGatewayId=rid, VpcId=vpc_id)
-                except ClientError:
-                    pass
+            # Re-query current attachments (metadata may be stale from discovery)
+            igw_resp = ec2.describe_internet_gateways(InternetGatewayIds=[rid])
+            igw_attachments = igw_resp["InternetGateways"][0].get("Attachments", []) if igw_resp["InternetGateways"] else []
+            for attachment in igw_attachments:
+                vpc_id = attachment.get("VpcId")
+                if vpc_id:
+                    try:
+                        ec2.detach_internet_gateway(InternetGatewayId=rid, VpcId=vpc_id)
+                    except ClientError:
+                        pass
             ec2.delete_internet_gateway(InternetGatewayId=rid)
 
         elif rtype == "ec2:nat_gateway":
@@ -64,9 +73,17 @@ class VPCDeleter(BaseDeleter):
             # Remove all ingress/egress rules that may reference other SGs
             sg = ec2.describe_security_groups(GroupIds=[rid])["SecurityGroups"][0]
             if sg.get("IpPermissions"):
-                ec2.revoke_security_group_ingress(GroupId=rid, IpPermissions=sg["IpPermissions"])
+                try:
+                    ec2.revoke_security_group_ingress(GroupId=rid, IpPermissions=sg["IpPermissions"])
+                except ClientError:
+                    pass
             if sg.get("IpPermissionsEgress"):
-                ec2.revoke_security_group_egress(GroupId=rid, IpPermissions=sg["IpPermissionsEgress"])
+                try:
+                    ec2.revoke_security_group_egress(GroupId=rid, IpPermissions=sg["IpPermissionsEgress"])
+                except ClientError:
+                    pass
+            # Delete available ENIs still referencing this SG (left by Lambda, RDS, etc.)
+            self._delete_enis_for_sg(ec2, rid)
             ec2.delete_security_group(GroupId=rid)
 
         elif rtype == "ec2:network_acl":
@@ -79,6 +96,40 @@ class VPCDeleter(BaseDeleter):
         elif rtype == "elb:load_balancer":
             elb = self.client("elb", resource.region)
             elb.delete_load_balancer(LoadBalancerName=rid)
+
+    def _delete_enis_in_subnet(self, ec2_client, subnet_id: str) -> None:
+        """Delete all available (detached) ENIs in a subnet."""
+        try:
+            paginator = ec2_client.get_paginator("describe_network_interfaces")
+            for page in paginator.paginate(Filters=[
+                {"Name": "subnet-id", "Values": [subnet_id]},
+                {"Name": "status", "Values": ["available"]},
+            ]):
+                for eni in page.get("NetworkInterfaces", []):
+                    eni_id = eni["NetworkInterfaceId"]
+                    try:
+                        ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
+                    except ClientError as e:
+                        logger.warning(f"Could not delete ENI {eni_id} in subnet {subnet_id}: {e}")
+        except ClientError as e:
+            logger.warning(f"Could not list ENIs in subnet {subnet_id}: {e}")
+
+    def _delete_enis_for_sg(self, ec2_client, sg_id: str) -> None:
+        """Delete all available (detached) ENIs that reference this security group."""
+        try:
+            paginator = ec2_client.get_paginator("describe_network_interfaces")
+            for page in paginator.paginate(Filters=[
+                {"Name": "group-id", "Values": [sg_id]},
+                {"Name": "status", "Values": ["available"]},
+            ]):
+                for eni in page.get("NetworkInterfaces", []):
+                    eni_id = eni["NetworkInterfaceId"]
+                    try:
+                        ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
+                    except ClientError as e:
+                        logger.warning(f"Could not delete ENI {eni_id} for SG {sg_id}: {e}")
+        except ClientError as e:
+            logger.warning(f"Could not list ENIs for SG {sg_id}: {e}")
 
     def _wait_nat_deleted(self, ec2_client, nat_id: str, max_wait: int = 180):
         elapsed = 0
