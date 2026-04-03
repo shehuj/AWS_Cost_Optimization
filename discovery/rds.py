@@ -44,7 +44,7 @@ class RDSDiscoverer(BaseDiscoverer):
         paginator = rds.get_paginator("describe_db_instances")
         for page in paginator.paginate():
             for db in page["DBInstances"]:
-                if db["DBInstanceStatus"] == "deleted":
+                if db["DBInstanceStatus"] in ("deleted", "deleting"):
                     continue
                 arn = db["DBInstanceArn"]
                 tags = tags_to_dict(rds.list_tags_for_resource(ResourceName=arn)["TagList"])

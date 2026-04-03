@@ -22,7 +22,7 @@ class EC2Discoverer(BaseDiscoverer):
         for page in paginator.paginate():
             for reservation in page["Reservations"]:
                 for inst in reservation["Instances"]:
-                    if inst["State"]["Name"] in ("terminated", "shutting-down"):
+                    if inst["State"]["Name"] != "running":
                         continue
                     tags = tags_to_dict(inst.get("Tags", []))
                     name = tags.get("Name", inst["InstanceId"])
