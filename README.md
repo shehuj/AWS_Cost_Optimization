@@ -367,7 +367,7 @@ Resources are grouped into dependency-ordered waves. All resources within a wave
 | 21–26 | RDS Cleanup | instances · snapshots · subnet groups · param groups |
 | 30 | Load Balancers | `elbv2:load_balancer` · `elb:load_balancer` |
 | 40 | NAT Gateways | `ec2:nat_gateway` |
-| 50–51 | Block Storage | `ec2:volume` · `ec2:snapshot` · `ec2:ami` |
+| 50–52 | Block Storage | `ec2:ami` · `ec2:volume` · `ec2:snapshot` |
 | 60 | Elastic IPs | `ec2:elastic_ip` |
 | 65 | VPC Endpoints | `ec2:vpc_endpoint` |
 | 70 | Security Groups | `ec2:security_group` |

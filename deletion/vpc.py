@@ -97,39 +97,68 @@ class VPCDeleter(BaseDeleter):
             elb = self.client("elb", resource.region)
             elb.delete_load_balancer(LoadBalancerName=rid)
 
-    def _delete_enis_in_subnet(self, ec2_client, subnet_id: str) -> None:
-        """Delete all available (detached) ENIs in a subnet."""
-        try:
-            paginator = ec2_client.get_paginator("describe_network_interfaces")
-            for page in paginator.paginate(Filters=[
-                {"Name": "subnet-id", "Values": [subnet_id]},
-                {"Name": "status", "Values": ["available"]},
-            ]):
-                for eni in page.get("NetworkInterfaces", []):
-                    eni_id = eni["NetworkInterfaceId"]
-                    try:
-                        ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
-                    except ClientError as e:
-                        logger.warning(f"Could not delete ENI {eni_id} in subnet {subnet_id}: {e}")
-        except ClientError as e:
-            logger.warning(f"Could not list ENIs in subnet {subnet_id}: {e}")
+    def _delete_enis_in_subnet(self, ec2_client, subnet_id: str, max_wait: int = 300) -> None:
+        """Wait for all in-use ENIs in a subnet to release, then delete them."""
+        self._wait_and_delete_enis(
+            ec2_client,
+            filters=[{"Name": "subnet-id", "Values": [subnet_id]}],
+            context=f"subnet {subnet_id}",
+            max_wait=max_wait,
+        )
 
-    def _delete_enis_for_sg(self, ec2_client, sg_id: str) -> None:
-        """Delete all available (detached) ENIs that reference this security group."""
-        try:
-            paginator = ec2_client.get_paginator("describe_network_interfaces")
-            for page in paginator.paginate(Filters=[
-                {"Name": "group-id", "Values": [sg_id]},
-                {"Name": "status", "Values": ["available"]},
-            ]):
-                for eni in page.get("NetworkInterfaces", []):
-                    eni_id = eni["NetworkInterfaceId"]
-                    try:
-                        ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
-                    except ClientError as e:
-                        logger.warning(f"Could not delete ENI {eni_id} for SG {sg_id}: {e}")
-        except ClientError as e:
-            logger.warning(f"Could not list ENIs for SG {sg_id}: {e}")
+    def _delete_enis_for_sg(self, ec2_client, sg_id: str, max_wait: int = 300) -> None:
+        """Wait for all in-use ENIs referencing this SG to release, then delete them."""
+        self._wait_and_delete_enis(
+            ec2_client,
+            filters=[{"Name": "group-id", "Values": [sg_id]}],
+            context=f"SG {sg_id}",
+            max_wait=max_wait,
+        )
+
+    def _wait_and_delete_enis(self, ec2_client, filters: list, context: str, max_wait: int) -> None:
+        """
+        Poll until all ENIs matching filters are in 'available' state, then delete them.
+        ENIs left by Lambda, RDS, and ECS can take several minutes to release after
+        their parent resource is deleted.
+        """
+        interval = 15
+        elapsed = 0
+
+        while elapsed <= max_wait:
+            try:
+                paginator = ec2_client.get_paginator("describe_network_interfaces")
+                enis = []
+                for page in paginator.paginate(Filters=filters):
+                    enis.extend(page.get("NetworkInterfaces", []))
+            except ClientError as e:
+                logger.warning(f"Could not list ENIs for {context}: {e}")
+                return
+
+            if not enis:
+                return
+
+            in_use = [e for e in enis if e["Status"] == "in-use"]
+            available = [e for e in enis if e["Status"] == "available"]
+
+            # Delete any that are already available
+            for eni in available:
+                eni_id = eni["NetworkInterfaceId"]
+                try:
+                    ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
+                except ClientError as e:
+                    logger.warning(f"Could not delete ENI {eni_id} for {context}: {e}")
+
+            if not in_use:
+                return
+
+            logger.debug(
+                f"Waiting for {len(in_use)} in-use ENI(s) to release for {context} "
+                f"({elapsed}s elapsed)"
+            )
+            time.sleep(interval)
+            elapsed += interval
+
+        logger.warning(f"Timed out waiting for ENIs to release for {context}")
 
     def _wait_nat_deleted(self, ec2_client, nat_id: str, max_wait: int = 180):
         elapsed = 0
