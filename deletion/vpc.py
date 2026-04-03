@@ -17,6 +17,7 @@ class VPCDeleter(BaseDeleter):
             "ec2:internet_gateway",
             "ec2:nat_gateway",
             "ec2:vpc_endpoint",
+            "ec2:network_interface",
             "ec2:security_group",
             "ec2:network_acl",
             "elbv2:load_balancer",
@@ -32,8 +33,9 @@ class VPCDeleter(BaseDeleter):
             ec2.delete_vpc(VpcId=rid)
 
         elif rtype == "ec2:subnet":
-            # Delete available ENIs in the subnet (left by Lambda, RDS, ECS, etc.)
-            self._delete_enis_in_subnet(ec2, rid)
+            # ENIs should already be gone from the dedicated ec2:network_interface wave.
+            # Do a quick cleanup of any stragglers created after discovery.
+            self._delete_available_enis(ec2, [{"Name": "subnet-id", "Values": [rid]}], f"subnet {rid}")
             ec2.delete_subnet(SubnetId=rid)
 
         elif rtype == "ec2:route_table":
@@ -69,6 +71,9 @@ class VPCDeleter(BaseDeleter):
         elif rtype == "ec2:vpc_endpoint":
             ec2.delete_vpc_endpoints(VpcEndpointIds=[rid])
 
+        elif rtype == "ec2:network_interface":
+            self._delete_network_interface(ec2, rid, resource)
+
         elif rtype == "ec2:security_group":
             # Remove all ingress/egress rules that may reference other SGs
             sg = ec2.describe_security_groups(GroupIds=[rid])["SecurityGroups"][0]
@@ -82,8 +87,8 @@ class VPCDeleter(BaseDeleter):
                     ec2.revoke_security_group_egress(GroupId=rid, IpPermissions=sg["IpPermissionsEgress"])
                 except ClientError:
                     pass
-            # Delete available ENIs still referencing this SG (left by Lambda, RDS, etc.)
-            self._delete_enis_for_sg(ec2, rid)
+            # Quick cleanup of any stragglers (dedicated ENI wave handles the main wait)
+            self._delete_available_enis(ec2, [{"Name": "group-id", "Values": [rid]}], f"SG {rid}")
             ec2.delete_security_group(GroupId=rid)
 
         elif rtype == "ec2:network_acl":
@@ -97,68 +102,57 @@ class VPCDeleter(BaseDeleter):
             elb = self.client("elb", resource.region)
             elb.delete_load_balancer(LoadBalancerName=rid)
 
-    def _delete_enis_in_subnet(self, ec2_client, subnet_id: str, max_wait: int = 300) -> None:
-        """Wait for all in-use ENIs in a subnet to release, then delete them."""
-        self._wait_and_delete_enis(
-            ec2_client,
-            filters=[{"Name": "subnet-id", "Values": [subnet_id]}],
-            context=f"subnet {subnet_id}",
-            max_wait=max_wait,
-        )
-
-    def _delete_enis_for_sg(self, ec2_client, sg_id: str, max_wait: int = 300) -> None:
-        """Wait for all in-use ENIs referencing this SG to release, then delete them."""
-        self._wait_and_delete_enis(
-            ec2_client,
-            filters=[{"Name": "group-id", "Values": [sg_id]}],
-            context=f"SG {sg_id}",
-            max_wait=max_wait,
-        )
-
-    def _wait_and_delete_enis(self, ec2_client, filters: list, context: str, max_wait: int) -> None:
+    def _delete_network_interface(self, ec2_client, eni_id: str, resource: Resource,
+                                   max_wait: int = 900) -> None:
         """
-        Poll until all ENIs matching filters are in 'available' state, then delete them.
-        ENIs left by Lambda, RDS, and ECS can take several minutes to release after
-        their parent resource is deleted.
+        Delete an ENI.  If it is still in-use (managed by Lambda, RDS, ECS, etc.),
+        wait for the owning service to release it before deleting.
+        max_wait defaults to 15 minutes — Lambda VPC ENI cleanup can be slow.
         """
         interval = 15
         elapsed = 0
-
         while elapsed <= max_wait:
             try:
-                paginator = ec2_client.get_paginator("describe_network_interfaces")
-                enis = []
-                for page in paginator.paginate(Filters=filters):
-                    enis.extend(page.get("NetworkInterfaces", []))
+                resp = ec2_client.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
             except ClientError as e:
-                logger.warning(f"Could not list ENIs for {context}: {e}")
-                return
-
+                if e.response["Error"]["Code"] == "InvalidNetworkInterfaceID.NotFound":
+                    return  # Already gone
+                raise
+            enis = resp.get("NetworkInterfaces", [])
             if not enis:
+                return  # Already gone
+
+            status = enis[0]["Status"]
+            if status == "available":
+                ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
                 return
 
-            in_use = [e for e in enis if e["Status"] == "in-use"]
-            available = [e for e in enis if e["Status"] == "available"]
-
-            # Delete any that are already available
-            for eni in available:
-                eni_id = eni["NetworkInterfaceId"]
-                try:
-                    ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
-                except ClientError as e:
-                    logger.warning(f"Could not delete ENI {eni_id} for {context}: {e}")
-
-            if not in_use:
-                return
-
-            logger.debug(
-                f"Waiting for {len(in_use)} in-use ENI(s) to release for {context} "
-                f"({elapsed}s elapsed)"
+            itype = resource.metadata.get("interface_type", "interface")
+            logger.info(
+                f"  ENI {eni_id} ({itype}) is {status} — waiting for owning service to release it "
+                f"({elapsed}s / {max_wait}s)"
             )
             time.sleep(interval)
             elapsed += interval
 
-        logger.warning(f"Timed out waiting for ENIs to release for {context}")
+        raise RuntimeError(
+            f"ENI {eni_id} did not become available within {max_wait}s — "
+            "the owning service may still be running"
+        )
+
+    def _delete_available_enis(self, ec2_client, filters: list, context: str) -> None:
+        """Quick sweep: delete any ENIs already in 'available' state. No waiting."""
+        try:
+            paginator = ec2_client.get_paginator("describe_network_interfaces")
+            for page in paginator.paginate(Filters=filters + [{"Name": "status", "Values": ["available"]}]):
+                for eni in page.get("NetworkInterfaces", []):
+                    eni_id = eni["NetworkInterfaceId"]
+                    try:
+                        ec2_client.delete_network_interface(NetworkInterfaceId=eni_id)
+                    except ClientError as e:
+                        logger.warning(f"Could not delete straggler ENI {eni_id} for {context}: {e}")
+        except ClientError as e:
+            logger.warning(f"Could not list straggler ENIs for {context}: {e}")
 
     def _wait_nat_deleted(self, ec2_client, nat_id: str, max_wait: int = 180):
         elapsed = 0

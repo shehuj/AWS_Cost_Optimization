@@ -370,6 +370,7 @@ Resources are grouped into dependency-ordered waves. All resources within a wave
 | 50–52 | Block Storage | `ec2:ami` · `ec2:volume` · `ec2:snapshot` |
 | 60 | Elastic IPs | `ec2:elastic_ip` |
 | 65 | VPC Endpoints | `ec2:vpc_endpoint` |
+| 68 | Network Interfaces | `ec2:network_interface` (Lambda/RDS/ECS ENIs) |
 | 70 | Security Groups | `ec2:security_group` |
 | 80–81 | Routing | `ec2:route_table` · `ec2:network_acl` |
 | 90 | Subnets | `ec2:subnet` |
