@@ -59,8 +59,6 @@ class BaseDeleter(ABC):
             except Exception as e:
                 return DeletionResult(resource, success=False, error=str(e))
 
-        return DeletionResult(resource, success=False, error="Max retries exceeded")
-
     @abstractmethod
     def _delete(self, resource: Resource) -> None:
         """Perform the actual deletion. Must raise on failure."""

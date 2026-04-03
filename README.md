@@ -362,7 +362,7 @@ Resources are grouped into dependency-ordered waves. All resources within a wave
 | Wave | Label | Resource Types |
 | ---- | ----- | -------------- |
 | 0 | CloudFormation Stacks | `cloudformation:stack` |
-| 10 | Compute | `ec2:instance` · `lambda:function` |
+| 10 | Compute | `ec2:instance` · `ec2:key_pair` · `lambda:function` · `lambda:layer` |
 | 20 | Data | `rds:cluster` · `s3:bucket` · `dynamodb:table` |
 | 21–26 | RDS Cleanup | instances · snapshots · subnet groups · param groups |
 | 30 | Load Balancers | `elbv2:load_balancer` · `elb:load_balancer` |
@@ -378,6 +378,17 @@ Resources are grouped into dependency-ordered waves. All resources within a wave
 | 120–130 | IAM | roles · users · groups · policies |
 
 > CloudFormation stacks are always deleted first. When a stack is deleted, AWS tears down its managed resources automatically — this prevents race conditions with the service-specific deleters.
+
+---
+
+## Retry and Idempotency
+
+The orchestrator runs two passes over failed resources before giving up:
+
+1. **Per-resource retries** — each deleter retries up to 3 times on AWS throttling errors (`Throttling`, `RequestLimitExceeded`) with linear back-off.
+2. **Wave-level dependency retries** — after all waves complete, any resource that failed with a dependency error (`DependencyViolation`, `cannot be deleted`, etc.) is retried up to 3 more times with exponential back-off (2 s, 4 s, 8 s). This handles cases where deletion order within a wave still leaves a transient dependency.
+
+Resources that are already gone when the deleter runs are silently treated as success — the tool is safe to re-run against a partially-cleaned account.
 
 ---
 

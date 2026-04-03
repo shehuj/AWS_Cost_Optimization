@@ -20,6 +20,8 @@ DELETION_PRIORITY = {
     "cloudformation:stack": 0,
     "ec2:instance": 10,
     "lambda:function": 10,
+    "lambda:layer": 10,
+    "ec2:key_pair": 10,
     "rds:cluster": 20,
     "rds:instance": 21,
     "rds:snapshot": 22,

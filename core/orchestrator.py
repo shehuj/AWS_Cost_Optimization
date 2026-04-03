@@ -229,16 +229,6 @@ class ResetOrchestrator:
 
         return all_results
 
-    def _delete_in_waves(self, waves: List[List[Resource]]) -> List[DeletionResult]:
-        all_results: List[DeletionResult] = []
-        for i, wave in enumerate(waves, 1):
-            logger.info(f"--- Wave {i}: {len(wave)} resources ---")
-            wave_results = self._delete_wave(wave)
-            all_results.extend(wave_results)
-            for f in (r for r in wave_results if not r.success):
-                log_error(logger, f"Failed: {f.resource.resource_type} {f.resource.resource_id}: {f.error}")
-        return all_results
-
     def _delete_wave(self, resources: List[Resource]) -> List[DeletionResult]:
         results: List[DeletionResult] = []
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
