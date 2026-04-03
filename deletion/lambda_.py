@@ -1,5 +1,10 @@
+import logging
+
+from botocore.exceptions import ClientError
 from discovery.base import Resource
 from .base import BaseDeleter
+
+logger = logging.getLogger("aws-reset")
 
 
 class LambdaDeleter(BaseDeleter):
@@ -22,5 +27,9 @@ class LambdaDeleter(BaseDeleter):
                         LayerName=resource.resource_id,
                         VersionNumber=version,
                     )
-                except Exception:
-                    pass
+                except ClientError as e:
+                    code = e.response["Error"]["Code"]
+                    if code not in ("ResourceNotFoundException",):
+                        logger.warning(
+                            f"Could not delete layer version {version} of {resource.resource_id}: {e}"
+                        )

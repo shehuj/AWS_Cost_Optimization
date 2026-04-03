@@ -176,7 +176,6 @@ def apply(regions, services, skip_iam, skip_default_vpc, skip_cloudformation,
 # ---------------------------------------------------------------------------
 
 def _write_plan_file(destroy_plan, path: str, fmt: str) -> None:
-    from core.plan_formatter import format_markdown, format_json
     if fmt == "json":
         content = format_json(destroy_plan)
     else:

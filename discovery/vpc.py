@@ -1,6 +1,9 @@
+import logging
 from typing import List
 from botocore.exceptions import ClientError
 from .base import BaseDiscoverer, Resource, tags_to_dict
+
+logger = logging.getLogger("aws-reset")
 
 
 class VPCDiscoverer(BaseDiscoverer):
@@ -204,8 +207,8 @@ class VPCDiscoverer(BaseDiscoverer):
                         arn=lb["LoadBalancerArn"],
                         metadata={"vpc_id": lb.get("VpcId", ""), "type": lb["Type"]},
                     ))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to discover ELBv2 load balancers in {self.region}: {e}")
 
         # Classic ELB
         try:
@@ -221,7 +224,7 @@ class VPCDiscoverer(BaseDiscoverer):
                         tags={},
                         metadata={"vpc_id": lb.get("VPCId", "")},
                     ))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to discover classic ELBs in {self.region}: {e}")
 
         return resources

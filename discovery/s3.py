@@ -30,7 +30,7 @@ class S3Discoverer(BaseDiscoverer):
                 tags = tags_to_dict(tag_response.get("TagSet", []))
             except ClientError as e:
                 if e.response["Error"]["Code"] != "NoSuchTagSet":
-                    pass  # bucket has no tags — fine
+                    raise  # unexpected error — propagate
 
             resources.append(Resource(
                 resource_id=name,

@@ -33,7 +33,7 @@ class CloudFormationDeleter(BaseDeleter):
                 if status == "DELETE_FAILED":
                     raise RuntimeError(f"CloudFormation stack deletion failed: {stack_name}")
             except ClientError as e:
-                if "does not exist" in str(e):
+                if e.response["Error"]["Code"] == "ValidationError" and "does not exist" in str(e):
                     return
                 raise
             time.sleep(interval)
